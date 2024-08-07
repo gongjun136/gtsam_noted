@@ -93,44 +93,58 @@ po::variables_map parseOptions(int argc, char *argv[])
   return vm; // 返回解析的选项数据
 }
 
-// 设置IMU预积分参数，定义加速度计和陀螺仪的噪声模型，以及加速度计和陀螺仪的偏差随机游走噪声
+// 设置IMU预积分参数，定义加速度计和陀螺仪的噪声模型，以及加速度计和陀螺仪的bias随机游走噪声
 boost::shared_ptr<PreintegratedCombinedMeasurements::Params> imuParams()
 {
-  // We use the sensor specs to build the noise model for the IMU factor.
+  // 定义加速度计的噪声标准差
   double accel_noise_sigma = 0.0003924;
+  // 定义陀螺仪的噪声标准差
   double gyro_noise_sigma = 0.000205689024915;
+  // 定义加速度计bias的随机游走噪声标准差
   double accel_bias_rw_sigma = 0.004905;
+  // 定义陀螺仪bias的随机游走噪声标准差
   double gyro_bias_rw_sigma = 0.000001454441043;
+  // 计算加速度计测量的协方差矩阵，使用噪声标准差的平方
   Matrix33 measured_acc_cov = I_3x3 * pow(accel_noise_sigma, 2);
+  // 计算陀螺仪测量的协方差矩阵，使用噪声标准差的平方
   Matrix33 measured_omega_cov = I_3x3 * pow(gyro_noise_sigma, 2);
+  // 定义在速度积分过程中产生的误差的协方差矩阵
   Matrix33 integration_error_cov =
       I_3x3 * 1e-8; // error committed in integrating position from velocities
+  // 计算加速度计bias的协方差矩阵，使用bias随机游走噪声标准差的平方
   Matrix33 bias_acc_cov = I_3x3 * pow(accel_bias_rw_sigma, 2);
+  // 计算陀螺仪bias的协方差矩阵，使用bias随机游走噪声标准偏差的平方
   Matrix33 bias_omega_cov = I_3x3 * pow(gyro_bias_rw_sigma, 2);
+  // 初始化加速度计和陀螺仪bias的协方差矩阵，用于预积分
   Matrix66 bias_acc_omega_init =
       I_6x6 * 1e-5; // error in the bias used for preintegration
 
+  // 创建预积分参数的共享指针，零偏差模型用于初始化
+  // MakeSharedD 和 MakeSharedU 为构造函数提供重力向量，这是预积分计算中至关重要的一个参数，因为它直接影响到预积分中的加速度计数据的处理。
+  // 在不同的导航框架下，重力向量的方向不同，所以提供这两种不同的构造方法允许用户基于他们系统的实际设定来选择合适的方法。例如：
+  // NED（北东地）：通常用在航空和水下导航系统中，其中重力是沿着正Z轴（向下）。
+  // ENU（东北天）：常用在陆地和某些机器人系统中，重力沿着负Z轴（向上）。
+  // 这里是测试的数据，并没有重力的影响，所以参数构造函数中重力向量的大小设置为 0.0
   auto p = PreintegratedCombinedMeasurements::Params::MakeSharedD(0.0);
-  // PreintegrationBase params:
-  p->accelerometerCovariance =
-      measured_acc_cov; // acc white noise in continuous
-  p->integrationCovariance =
-      integration_error_cov; // integration uncertainty continuous
-  // should be using 2nd order integration
-  // PreintegratedRotation params:
-  p->gyroscopeCovariance =
-      measured_omega_cov; // gyro white noise in continuous
-  // PreintegrationCombinedMeasurements params:
-  p->biasAccCovariance = bias_acc_cov;     // acc bias in continuous
-  p->biasOmegaCovariance = bias_omega_cov; // gyro bias in continuous
+  // 设置加速度计的连续白噪声协方差
+  p->accelerometerCovariance = measured_acc_cov;
+  // 设置积分过程中的连续积分不确定性协方差
+  p->integrationCovariance = integration_error_cov;
+  // 设置陀螺仪的连续白噪声协方差
+  p->gyroscopeCovariance = measured_omega_cov;
+  // 设置加速度计偏差的连续协方差
+  p->biasAccCovariance = bias_acc_cov;
+  // 设置陀螺仪偏差的连续协方差
+  p->biasOmegaCovariance = bias_omega_cov;
+  // 设置加速度计和陀螺仪偏差的初始协方差
   p->biasAccOmegaInt = bias_acc_omega_init;
-
+  // 返回初始化后的预积分参数对象
   return p;
 }
 
 int main(int argc, char *argv[])
 {
-
+  // 程序中使用了 Boost 库的 program_options 来解析命令行输入.
   // 解析命令行参数，设置数据和输出文件路径，以及是否使用ISAM优化器
   po::variables_map var_map = parseOptions(argc, argv);
 
@@ -153,7 +167,7 @@ int main(int argc, char *argv[])
     printf("Using Levenberg Marquardt Optimizer\n");
   }
 
-  // 打开输出文件，用于记录优化的结果
+  // 打开输出文件，用于记录优化的误差量
   FILE *fp_out = fopen(output_filename.c_str(), "w+");
   fprintf(fp_out,
           "#time(s),x(m),y(m),z(m),qx,qy,qz,qw,gt_x(m),gt_y(m),gt_z(m),gt_qx,"
@@ -187,7 +201,7 @@ int main(int argc, char *argv[])
 
   // 创建一个 Values 对象，用来存储优化问题的初始估计值。
   Values initial_values;
-  int correction_count = 0;   // 用作因子图中的键索引，表示当前处理的是第几个状态估计。
+  int correction_count = 0; // 用作因子图中的键索引，表示当前处理的是第几个状态估计。
   // X(correction_count) 生成一个与 correction_count 相关联的符号键，用于表示机器人或传感器的位姿（位置和方向）。
   // 在 GTSAM 中，符号键通常由一个字母（如 X 表示位姿，V 表示速度，B 表示偏置）和一个数字组成，数字用来区分不同的时间步或实例。
   initial_values.insert(X(correction_count), prior_pose);
@@ -201,7 +215,7 @@ int main(int argc, char *argv[])
   auto velocity_noise_model = noiseModel::Isotropic::Sigma(3, 0.1); // m/s
   auto bias_noise_model = noiseModel::Isotropic::Sigma(6, 1e-3);
 
-  // 添加所有的先验因子和噪声模型
+  // 添加所有的先验因子和噪声模型到因子图中
   NonlinearFactorGraph *graph = new NonlinearFactorGraph();
   graph->addPrior(X(correction_count), prior_pose, pose_noise_model);
   graph->addPrior(V(correction_count), prior_velocity, velocity_noise_model);
@@ -210,15 +224,17 @@ int main(int argc, char *argv[])
   // 设置IMU预积分参数
   auto p = imuParams();
 
+  // PreintegrationType：这通常是一个类型别名，指向预积分测量处理的一个基类或接口，提供了所有预积分类需要实现的公共接口和功能。
+  // PreintegratedImuMeasurements：这是 PreintegrationType 的一个具体实现，它负责从IMU传感器收集的数据中计算预积分测量值。
   std::shared_ptr<PreintegrationType> preintegrated =
       std::make_shared<PreintegratedImuMeasurements>(p, prior_imu_bias);
 
   assert(preintegrated);
 
   // 从文件中读取数据，并应用IMU或GPS的更新
-  NavState prev_state(prior_pose, prior_velocity);
+  NavState prev_state(prior_pose, prior_velocity); // prev_state 用作存储上一次因子图优化的因子状态
   NavState prop_state = prev_state;
-  imuBias::ConstantBias prev_bias = prior_imu_bias;
+  imuBias::ConstantBias prev_bias = prior_imu_bias; // prev_bias 用作存储上一次因子图优化的IMU bias
 
   // Keep track of total error over the entire run as simple performance metric.
   double current_position_error = 0.0, current_orientation_error = 0.0;
@@ -247,11 +263,11 @@ int main(int argc, char *argv[])
       getline(file, value, '\n');
       imu(5) = stof(value.c_str());
 
-      // 添加IMU预积分
+      // 添加IMU 执行预积分计算
       preintegrated->integrateMeasurement(imu.head<3>(), imu.tail<3>(), dt);
     }
     else if (type == 1)
-    { 
+    {
       // GPS数据
       Vector7 gps;
       for (int i = 0; i < 6; ++i)
@@ -265,23 +281,34 @@ int main(int argc, char *argv[])
       correction_count++;
 
       // 添加IMU和GPS因子，并进行优化
+      // 1.将预积分的IMU测量对象转换为正确的类型，用于创建IMU因子
       auto preint_imu =
           dynamic_cast<const PreintegratedImuMeasurements &>(*preintegrated);
+      // 2.创建IMU因子，这个因子用来表达两个时间步之间的IMU测量所提供的信息
       ImuFactor imu_factor(X(correction_count - 1), V(correction_count - 1),
                            X(correction_count), V(correction_count),
                            B(correction_count - 1), preint_imu);
+      // 3.将IMU因子添加到因子图中，用于后续的图优化
       graph->add(imu_factor);
+      // 4.创建一个bias为零的IMU bias对象，用于IMU bias的连续性约束
       imuBias::ConstantBias zero_bias(Vector3(0, 0, 0), Vector3(0, 0, 0));
+      // 5.添加一个IMU bias因子，这个因子确保偏置在两个时间步之间保持一致
+      // 向因子图中添加了一个 BetweenFactor，这是一个非常有用的因子，用于表达两个变量之间的相对关系。
+      // 在这里，它用于表达连续两次状态估计中IMU偏置的变化应该保持为零（即没有变化）。
+      // zero_bias 用作这两个偏置之间期望的变化量，但是优化结果将取决于所有相关数据和约束的整体一致性，所以bias还是会改变的
       graph->add(BetweenFactor<imuBias::ConstantBias>(
           B(correction_count - 1), B(correction_count), zero_bias,
           bias_noise_model));
 
+      // 1.创建GPS测量的噪声模型，这里使用各向同性的噪声模型，标准差为1.0
       auto correction_noise = noiseModel::Isotropic::Sigma(3, 1.0);
+      // 2.创建GPS因子，这个因子将GPS提供的位置信息与状态估计联系起来
       GPSFactor gps_factor(X(correction_count),
                            Point3(gps(0),  // N,
                                   gps(1),  // E,
                                   gps(2)), // D,
                            correction_noise);
+      // 3.将GPS因子添加到因子图中
       graph->add(gps_factor);
 
       // 执行优化并比较结果
@@ -290,48 +317,62 @@ int main(int argc, char *argv[])
       initial_values.insert(V(correction_count), prop_state.v());
       initial_values.insert(B(correction_count), prev_bias);
 
+      // 优化并报错结果
       Values result;
-
       if (use_isam)
       {
+        // *graph：表示包含了所有因子的因子图，这些因子定义了变量间的关系和约束（例如IMU预积分因子和GPS因子等）。
+        // 每次调用 update 时，因子图 graph 中包含的是新的测量数据和因子。
+        // initial_values 提供新加入因子图中的变量的初始估计值。
         isam2->update(*graph, initial_values);
         result = isam2->calculateEstimate();
 
         // 重置因子图和初始值
+        // ISAM2 是一个增量式的优化方法，允许在接收新的测量数据时有效更新解，而不必从头开始重新优化整个问题。
         graph->resize(0);
         initial_values.clear();
       }
       else
       {
+        // Levenberg-Marquardt 优化器（LevenbergMarquardtOptimizer）在使用时需要优化整个因子图。
+        // 这种优化器属于批处理优化方法，适用于处理较小或者中等规模的问题，或者在数据集齐全后的一次性处理中使用。
         LevenbergMarquardtOptimizer optimizer(*graph, initial_values);
         result = optimizer.optimize();
       }
 
-     // 重新设置预积分器的bias
+      // 提取优化结果：最新位姿、速度、IMU bias
       prev_state = NavState(result.at<Pose3>(X(correction_count)),
                             result.at<Vector3>(V(correction_count)));
       prev_bias = result.at<imuBias::ConstantBias>(B(correction_count));
 
-      // Reset the preintegration object.
+      // 重新设置预积分器的bias
+      // 使用预积分技术处理IMU数据时，bias的变化可以显著影响预积分的准确性。
+      // 由于IMU的bias可能因为多种原因（如温度变化、机械应力等）而发生变化，所以在每次优化后使用新的bias值更新预积分器是保证系统准确性的关键步骤。
       preintegrated->resetIntegrationAndSetBias(prev_bias);
 
-     // 记录位置和方向误差
+      // 计算优化后的位置与GPS测量位置之间的差异
       Vector3 gtsam_position = prev_state.pose().translation();
+      // 1.位置误差
       Vector3 position_error = gtsam_position - gps.head<3>();
-      current_position_error = position_error.norm();
-
+      current_position_error = position_error.norm(); // 计算位置误差的欧几里得距离（范数），作为当前位置误差的度量
+      // 2.姿态误差
       Quaternion gtsam_quat = prev_state.pose().rotation().toQuaternion();
       Quaternion gps_quat(gps(6), gps(3), gps(4), gps(5));
-      Quaternion quat_error = gtsam_quat * gps_quat.inverse();
+      Quaternion quat_error = gtsam_quat * gps_quat.inverse(); // 方向误差
       quat_error.normalize();
+      // 将四元数的误差转换为欧拉角误差，因为四元数的x、y、z分量在乘法后表示旋转轴的正弦分量，因此乘以2后得到欧拉角误差
       Vector3 euler_angle_error(quat_error.x() * 2, quat_error.y() * 2,
                                 quat_error.z() * 2);
+      // 计算方向误差的欧几里得距离（范数），作为当前方向误差的度量
       current_orientation_error = euler_angle_error.norm();
 
-   // 输出统计信息
+      // 输出统计信息
       cout << "Position error:" << current_position_error << "\t "
            << "Angular error:" << current_orientation_error << "\n";
 
+      // 写入到文件中
+      // 格式如下：
+      // 时间戳（1位）-GTSAM优化后的三维位置坐标（3位）-GTSAM优化后的四元数表示的姿态（x, y, z, w）（4位）-GPS数据中获取的三维位置坐标（x, y, z）（3位）-GPS或其他外部源获取的四元数表示的姿态（4位）
       fprintf(fp_out, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f\n",
               output_time, gtsam_position(0), gtsam_position(1),
               gtsam_position(2), gtsam_quat.x(), gtsam_quat.y(), gtsam_quat.z(),
